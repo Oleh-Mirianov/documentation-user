@@ -4,16 +4,11 @@ from __future__ import print_function
 import os.path
 import posixpath
 import re
-try:
-    from urllib.request import url2pathname  # pylint: disable=deprecated-module
-except ImportError:
-    from urllib import url2pathname  # pylint: disable=deprecated-module
 
 from docutils import nodes
 from sphinx import addnodes, util, builders
 from sphinx.locale import admonitionlabels
-
-from odoo.tools import pycompat
+from urllib.request import url2pathname
 
 
 def _parents(node):
@@ -37,11 +32,6 @@ class BootstrapTranslator(nodes.NodeVisitor, object):
     html_title = 'html_title'
     html_subtitle = 'html_subtitle'
 
-    # <meta> tags
-    meta = [
-        '<meta http-equiv="X-UA-Compatible" content="IE=edge">',
-        '<meta name="viewport" content="width=device-width, initial-scale=1">'
-    ]
 
     def __init__(self, document, builder):
         # order of parameter swapped between Sphinx 1.x and 2.x, check if
@@ -51,6 +41,13 @@ class BootstrapTranslator(nodes.NodeVisitor, object):
 
         super(BootstrapTranslator, self).__init__(document)
         self.builder = builder
+        self.meta = [
+            # HTMLWriter strips out the first two items from Translator.meta
+            # with no explanation
+            '', '',
+        ]
+        self.add_meta('<meta http-equiv="X-UA-Compatible" content="IE=edge">')
+        self.add_meta('<meta name="viewport" content="width=device-width, initial-scale=1">')
         self.body = []
         self.fragment = self.body
         self.html_body = self.body
@@ -72,7 +69,7 @@ class BootstrapTranslator(nodes.NodeVisitor, object):
         self.param_separator = ','
 
     def encode(self, text):
-        return pycompat.text_type(text).translate({
+        return str(text).translate({
             ord('&'): u'&amp;',
             ord('<'): u'&lt;',
             ord('"'): u'&quot;',
@@ -80,8 +77,11 @@ class BootstrapTranslator(nodes.NodeVisitor, object):
             0xa0: u'&nbsp;'
         })
 
+    def add_meta(self, meta):
+        self.meta.append('\n    ' + meta)
+
     def starttag(self, node, tagname, **attributes):
-        tagname = pycompat.text_type(tagname).lower()
+        tagname = str(tagname).lower()
 
         # extract generic attributes
         attrs = {name.lower(): value for name, value in attributes.items()}
@@ -116,7 +116,7 @@ class BootstrapTranslator(nodes.NodeVisitor, object):
     # only "space characters" SPACE, CHARACTER TABULATION, LINE FEED,
     # FORM FEED and CARRIAGE RETURN should be collapsed, not al White_Space
     def attval(self, value, whitespace=re.compile(u'[ \t\n\f\r]+')):
-        return self.encode(whitespace.sub(u' ', pycompat.text_type(value)))
+        return self.encode(whitespace.sub(' ', str(value)))
 
     def astext(self):
         return u''.join(self.body)
@@ -134,6 +134,15 @@ class BootstrapTranslator(nodes.NodeVisitor, object):
     def visit_document(self, node):
         self.first_title = True
     def depart_document(self, node):
+        pass
+
+    def visit_meta(self, node):
+        if node.hasattr('lang'):
+            node['xml:lang'] = node['lang']
+            # del(node['lang'])
+        meta = self.starttag(node, 'meta', **node.non_default_attributes())
+        self.add_meta(meta)
+    def depart_meta(self, node):
         pass
 
     def visit_section(self, node):
@@ -506,6 +515,20 @@ class BootstrapTranslator(nodes.NodeVisitor, object):
         self.body.append(self.starttag(node, 'a', **attrs))
     def depart_reference(self, node):
         self.body.append(u'</a>')
+    def visit_download_reference(self, node):
+        # type: (nodes.Node) -> None
+        if node.hasattr('filename'):
+            self.body.append(
+                '<a class="reference download internal" href="%s" download="">' %
+                posixpath.join(self.builder.dlpath, node['filename']))
+            self.body.append(node.astext())
+            self.body.append('</a>')
+            raise nodes.SkipNode
+        else:
+            self.context.append('')
+    def depart_download_reference(self, node):
+        # type: (nodes.Node) -> None
+        self.body.append(self.context.pop())
     def visit_target(self, node): pass
     def depart_target(self, node): pass
     def visit_footnote(self, node):
@@ -642,6 +665,11 @@ class BootstrapTranslator(nodes.NodeVisitor, object):
         #           {{ card title }}
         env = self.builder.env
         conf = self.builder.app.config
+        node_metadata = env.metadata[node['parent']]
+        if 'banners-display' not in node_metadata:
+            # little perf improvement
+            # do not compute banners html if it won't be displayed anyway.
+            raise nodes.SkipNode
         for title, ref in ((e[0], e[1]) for e in node['entries']):
             # external URL, no toc, can't recurse into
             if ref not in env.tocs:
